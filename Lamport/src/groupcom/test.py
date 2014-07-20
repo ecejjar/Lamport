@@ -10,11 +10,17 @@ from socketserver import BaseRequestHandler
 from threading import  Thread, Timer, Lock
 from time import sleep
 from collections import deque, namedtuple
-from functools import reduce
+from functools import reduce, wraps
 import unittest
 import socket
 import os
 import re
+import logging
+
+if not hasattr(unittest, 'skip'):
+    unittest.skip = lambda func: func   # Python 3.0 and lower
+    
+logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', level=logging.DEBUG)
 
 class ServerTest(unittest.TestCase):
 
@@ -22,7 +28,11 @@ class ServerTest(unittest.TestCase):
         self.__msgq = deque()
         self.__abort = False
         self.__duprcvd = False
-        self.__leader = None
+        self.__leader = {}
+        
+        # This deserves an explanation: in Linux when connected over WLAN,
+        # if I let the kernel pick the IP address to use no multicast message is received
+        self.__hostaddr = "192.168.43.169" or socket.gethostname()
         
     def handle ( self, msg, src ):
         print("%s: received from %s: %s" % (type(self).__name__, src, msg))
@@ -43,8 +53,9 @@ class ServerTest(unittest.TestCase):
 
     def notify ( self, elector ):
         print("Elector at %s notifies its current leader is %d" % (elector.server_address, elector.leader))
-        self.__leader = elector.leader
+        self.__leader[elector.server_address] = elector.leader
                         
+    @unittest.skip("Unfinished")
     def testMcastServer ( self ):
         testData = bytes("Echo!", "utf8")
         def testfunc ( s ):
@@ -62,7 +73,7 @@ class ServerTest(unittest.TestCase):
                             
         port = 2000
         grp_addr = "224.0.0.1"
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating McastServer on interface %s bound to %s" % (host, grp_addr))
         server = McastServer((grp_addr, port), (host, port), TestHandler)
         try:
@@ -72,6 +83,7 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
             
+    @unittest.skip("Unfinished")
     def testMcastRouter ( self ):
         testData = "Echo!"
         port1, port2 = 2001, 2002
@@ -81,7 +93,7 @@ class ServerTest(unittest.TestCase):
             sleep(5)
             router.shutdown()
             
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating UDP socket on interface %s:%d" % (host, 2000))
         client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         client.bind((host, 2000))
@@ -97,6 +109,7 @@ class ServerTest(unittest.TestCase):
             router.server1.socket.close()
             router.server2.socket.close()  
         
+    @unittest.skip("Unfinished")
     def testRMcastServer ( self ):
         testData = "Echo!"
         port = 2003
@@ -108,7 +121,7 @@ class ServerTest(unittest.TestCase):
             s.shutdown()
             
         self.__msgq.clear()
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating RMcastServer on interface %s bound to %s" % (host, grp_addr))
         server = RMcastServer((grp_addr, port), (host, port), self)
         try:
@@ -118,6 +131,7 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
             
+    @unittest.skip("Unfinished")
     def testRMcastServerOrdering ( self ):
         testData = "Echo!"
         port = 2004
@@ -129,7 +143,7 @@ class ServerTest(unittest.TestCase):
             sleep(3)
             s.shutdown() 
 
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         self.__msgq.clear()
         print("Creating RMcastServer on interface %s bound to %s" % (host, grp_addr))
         server = RMcastServer((grp_addr, port), (host, port), self)
@@ -140,6 +154,7 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
          
+    @unittest.skip("Unfinished")
     def testRMcastServerDiscardDups ( self ):
         testData = "Echo!"
         port = 2005
@@ -152,7 +167,7 @@ class ServerTest(unittest.TestCase):
             s.shutdown()
              
         self.__msgq.clear()
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating RMcastServer on interface %s bound to %s" % (host, grp_addr))
         server = RMcastServer((grp_addr, port), (host, port), self)
         try:
@@ -162,6 +177,7 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
 
+    @unittest.skip("Unfinished")
     def testRMcastServerNak ( self ):
         testData = "Echo!"
         port = 2006
@@ -174,7 +190,7 @@ class ServerTest(unittest.TestCase):
             s.shutdown()
              
         self.__msgq.clear()
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating RMcastServer on interface %s bound to %s" % (host, grp_addr))
         server = RMcastServer((grp_addr, port), (host, port), self)
         try:
@@ -185,6 +201,7 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
         
+    @unittest.skip("Unfinished")
     def testRMcastServerRestart ( self ):
         testData = "Echo!"
         port = 2007
@@ -200,7 +217,7 @@ class ServerTest(unittest.TestCase):
             s.shutdown() 
 
         self.__msgq.clear()
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating RMcastServer on interface %s bound to %s" % (host, grp_addr))
         server = RMcastServer((grp_addr, port), (host, port), self)
         try:
@@ -210,6 +227,7 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
         
+    @unittest.skip("Unfinished")
     def testRMcastServerRestartNak ( self ):
         testData = "Echo!"
         port = 2007
@@ -225,7 +243,7 @@ class ServerTest(unittest.TestCase):
             s.shutdown()
              
         self.__msgq.clear()
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating RMcastServer on interface %s bound to %s" % (host, grp_addr))
         server = RMcastServer((grp_addr, port), (host, port), self)
         try:
@@ -236,6 +254,7 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
         
+    @unittest.skip("Unfinished")
     def testLosslessRMcastServer ( self ):
         testData = "Echo!"
         port = 2007
@@ -270,7 +289,7 @@ class ServerTest(unittest.TestCase):
             os.remove(file)
         
         self.__msgq.clear()
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         
         print("Creating lossless RMcastServer on interface %s bound to %s" % (host, grp_addr))
         server = TestRMcastServer((grp_addr, port), (host, port), self)
@@ -296,6 +315,7 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(server.duprcvd, "Lossless RMcast server test failed")
         self.assertCountEqual(self.__msgq, [msg(seq) for seq in range(1,11)], "Lossless RMcast server test failed")
         
+    @unittest.skip("Unfinished")
     def testProtocolAgent ( self ):
         def testfunc ( s, testmsgs ):
             for msg in testmsgs: s.send(msg, s.address())
@@ -337,7 +357,7 @@ class ServerTest(unittest.TestCase):
                 print("Peer %s closed connection" % str(peer))
                 
         testmsgs = [AgentTestRemote1.TestMsg(a=1, b='Hi'), AgentTestRemote1.TestMsg(a=2, b='there!')]
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         port = 2011
         agent = AgentTestRemote1((host, port))
         try:
@@ -356,7 +376,7 @@ class ServerTest(unittest.TestCase):
                 self.append(msg)
         
         testmsgs = [AgentTestRemote2.TestMsg(a=1, b='Hi'), AgentTestRemote2.TestMsg(a=2, b='there!')]
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         port = 2012
         agent = AgentTestRemote2((host, port))
         try:
@@ -375,7 +395,7 @@ class ServerTest(unittest.TestCase):
                 self.append(msg)
         
         testmsgs = [AgentTestRemote3.TestMsg(a=1, b='Hi'), AgentTestRemote3.TestMsg(a=2, b='there!')]
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         mcasthost = "224.0.0.1" 
         port = 2013
         agent = AgentTestRemote3((mcasthost, port), (host, port))
@@ -386,6 +406,7 @@ class ServerTest(unittest.TestCase):
         finally:
             agent.socket.close()
         
+    @unittest.skip("Unfinished")
     def testRepeatableTimer ( self ):
         testData = 'Hi there!'
         
@@ -398,15 +419,16 @@ class ServerTest(unittest.TestCase):
         
         timer = RepeatableTimer(1, ServerTest.handle, (self, testData, self), {}, 10)
         timer.start()
-        sleep(6)
+        sleep(5)
         timer.cancel()
         sleep(5)
         self.assertListEqual(list(self.__msgq), [testData]*5, "Lists not equal")
         
         self.__msgq.clear()
     
+    @unittest.skip("Unfinished")
     def testStateXferAgent ( self ):
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         port = 2007
         
         print("Creating state xfer agents on interface %s and ports %d and %d" % (host, port, port+1))
@@ -418,8 +440,10 @@ class ServerTest(unittest.TestCase):
             self.assertDictEqual(agentA.state, agentB.state, "States not equal")
         finally:
             agentA.socket.close()
+            agentB.shutdown()
             agentB.socket.close()
         
+    @unittest.skip("Unfinished")
     def testLogicalClockServer ( self ):
         testCommand = "echo"
         port = 2020
@@ -430,7 +454,7 @@ class ServerTest(unittest.TestCase):
             sleep(5)
             s.shutdown()
             
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         print("Creating LogicalClockServer on interface %s bound to %s" % (host, grp_addr))
         server = LogicalClockServer((grp_addr, port), (host, port), state_hostport=(host, 2021), death_time=2)
         try:
@@ -441,6 +465,7 @@ class ServerTest(unittest.TestCase):
             server.socket.close()
         self.assertDictEqual(server.members, {}, "Bye msg not received or not handled properly")
 
+    @unittest.skip("Not fully implemented yet")
     def testManyLogicalClockServers ( self ):
         if os.name != 'posix': return
         ADDRESS_BASE = '192.168.0.100'
@@ -467,38 +492,130 @@ class ServerTest(unittest.TestCase):
         def testfunc ( s ):
             s.serve_forever()
             
-        NUM_OF_PEERS = 10
+        NUM_OF_PEERS = 5 #10
         BASE_PORT = 2000
-        host = socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(self.__hostaddr)
         
         addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
-        peers = [LeaderElection.StableLeaderElector(addr, peers=addresses, timeout=0.1, observer=self) \
+        peers = [LeaderElection.LeaderElector(addr, peers=addresses, timeout=0.1, observer=self) \
+                 for addr in addresses]
+        threads = [Thread(target=testfunc, args=(peer,), name="LeaderElector@%s:%d" % peer.server_address) \
+                   for peer in peers]
+        #addresses = map(lambda port: (host, port), range(BASE_PORT, BASE_PORT+NUM_OF_PEERS))
+        #peers = map(lambda addr: LeaderElection.StableLeaderElector(addr, peers=addresses, timeout=0.1, observer=self), addresses)
+        #threads = map(lambda peer: Thread(target=testfunc, args=(peer,), name="%s:%d" % peer.server_address), peers)
+        try:
+            print("Starting %d basic leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
+            for thread in threads: thread.start()
+            print("Waiting for electors to agree on a leader, you should see some console messages...")
+            sleep(3)
+            l = next(iter(self.__leader.values()))
+            self.assertSameElements(
+                addresses, self.__leader.keys(),
+                "Something went wrong, some elector didn't notify its observer")
+            self.assertNotIn(
+                None, self.__leader.values(),
+                "Something went wrong, some elector has None as leader")
+            self.assertListEqual(
+                [l]*NUM_OF_PEERS, list(self.__leader.values()),
+                "Something went wrong, some elector disagreed in who's leader")
+            print("Electors agreed on peer %d, halting its thread" % l)
+            peers[l].shutdown()
+            peers[l].socket.close()
+            sleep(3)
+            self.assertNotIn(
+                l, filter(lambda p: p != l, self.__leader.values()),
+                "Some elector stuck on leader %d" % l)
+            print("Restarting old leader %d" % l)
+            # Do not reuse peers[l], its round and current leader are set to those when it was shutdown
+            peers[l] = LeaderElection.LeaderElector(addresses[l], peers=addresses, timeout=0.1, observer=self)
+            threads[l] = Thread(target=testfunc, args=(peers[l],), name="LeaderElector@%s:%d" % peers[l].server_address)
+            threads[l].start()
+            sleep(3)
+            l = next(iter(self.__leader.values()))
+            self.assertListEqual(
+                [l]*NUM_OF_PEERS, list(self.__leader.values()),
+                "Something went wrong, some elector disagreed in who's leader")
+        finally:
+            print("Shutting down all electors")
+            for peer in peers:
+                peer.shutdown()
+                peer.socket.close()
+
+    @unittest.skip("Unfinished")
+    def testStableLeaderElection ( self ):
+        def testfunc ( s ):
+            s.serve_forever()
+            
+        NUM_OF_PEERS = 5
+        BASE_PORT = 2000
+        host = socket.gethostbyname(self.__hostaddr)
+        d = 0.2
+        M = 2   # The arbitrarily long time that link to&from peer 2 delays messages
+        
+        addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
+        peers = [LeaderElection.StableLeaderElector(addr, peers=addresses, timeout=d, observer=self) \
                  for addr in addresses]
         threads = [Thread(target=testfunc, args=(peer,), name="StableLeaderElector@%s:%d" % peer.server_address) \
                    for peer in peers]
         #addresses = map(lambda port: (host, port), range(BASE_PORT, BASE_PORT+NUM_OF_PEERS))
         #peers = map(lambda addr: LeaderElection.StableLeaderElector(addr, peers=addresses, timeout=0.1, observer=self), addresses)
         #threads = map(lambda peer: Thread(target=testfunc, args=(peer,), name="%s:%d" % peer.server_address), peers)
+        
+        # For this test we need a special class of agent, one that
+        # simulates a very slow link (link delay >> d).
+        # Define a decorator that delays a function call.
+        def delayed ( func ):
+            @wraps(func)
+            def wrapper ( *args, **kwargs ):
+                Timer(M, func, args, kwargs).start()
+            return wrapper
+
+        # Right after starting round 1 (time 2d+2), process 2 crashes.
+        # Define a decorator for startRound() that shuts down the peer if the round is 1 
+        def crashing ( func ):
+            @wraps(func)
+            def wrapper ( obj, r ):
+                result = func(obj, r)
+                if r == 1:
+                    obj.shutdown()
+                    obj.socket.close()
+                return result
+            return wrapper
+        
+        # Now replace the second peer's send(), handle() and startRound() by the modified ones.
+        # This has two consequences:
+        # 1. the second peer does not agree on 0 as leader until after a long time (>> d)
+        # 2. the second peer times out on 0 and starts round 1, but it takes a long time
+        #    (>> d) for the other peers to realize
+        # 3. the second peer does not react to any other message after starting round 1
+        # The outcome is that 0 is demoted and 1 promoted without apparent reason!!
+        peers[2].handle = delayed(peers[2].handle)
+        peers[2].send = delayed(peers[2].send)
+        peers[2].startRound = crashing(peers[2].startRound)
+
         try:
             print("Starting %d stable leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
             for thread in threads: thread.start()
             print("Waiting for electors to agree on a leader, you should see some console messages...")
-            sleep(3)
-            l = self.__leader
-            self.assertIsNotNone(l, "Something went wrong, some elector has None as leader")
-            print("Electors agreed on peer %d, halting its thread" % l)
-            peers[l].shutdown()
-            peers[l].socket.close()
-            sleep(3)
-            self.assertFalse(self.__leader == l, "Electors stuck on leader %d" % l)
-            print("Restarting old leader %d" % l)
-            # Do not reuse peers[l], its round and current leader are set to those when it was shutdown
-            peers[l] = LeaderElection.StableLeaderElector(addresses[l], peers=addresses, timeout=0.1, observer=self)
-            threads[l] = Thread(target=testfunc, args=(peers[l],), name="StableLeaderElector@%s:%d" % peers[l].server_address)
-            threads[l].start()
-            sleep(3)
-            self.assertFalse(self.__leader == l, "Electors failed back to leader %d" % l)
+            sleep(M/2)
+            l = next(iter(self.__leader.values()))
+            self.assertNotIn(
+                None, self.__leader.values(),
+                "Something went wrong, some elector has None as leader")
+            self.assertSameElements(
+                addresses, self.__leader.keys(),
+                "Something went wrong, some elector didn't notify its observer")
+            self.assertListEqual(
+                [l]*NUM_OF_PEERS, list(self.__leader.values()),
+                "Something went wrong, some elector disagreed in who's leader")
+            print("Electors agreed on peer %d" % l)
+            sleep(M/2)
+            self.assertListEqual(
+                [0]*NUM_OF_PEERS, list(self.__leader.values()),
+                "Something went wrong after M seconds, either some elector disagreed in who's leader or electors failed-over to process 1")
         finally:
+            print("Shutting down all electors")
             for peer in peers:
                 peer.shutdown()
                 peer.socket.close()

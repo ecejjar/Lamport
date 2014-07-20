@@ -17,19 +17,19 @@ from collections import namedtuple, deque
 from struct import pack, unpack, calcsize
 from heapq import heappush, heappop
 from random import uniform
-from threading import Timer, Lock, Thread
+from threading import Timer, Lock, Thread, _Timer
 from operator import add
 from select import select
-from time import clock, time
+from time import clock
 import shelve
 import socket
 import json
 import os
 import re
+import platform
 import logging
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 class McastServer(UDPServer):
     '''
@@ -38,17 +38,19 @@ class McastServer(UDPServer):
     >>> from groupcom.server import McastServer
     >>> import socket
     >>> host = socket.gethostbyname(socket.gethostname())
-    >>> my_server = McastServer((host, 2000), (225.0.0.1, 2000), 32, MyHandlerClass)
+    >>> my_server = McastServer(('myhost', 2000), ('225.0.0.1', 2000), 32, MyHandlerClass)
     >>> server.serve_forever()
     '''
 
-    def __init__ ( self, mcast_hostport, hostport, handler, ttl=32 ):
+    def __init__ ( self, mcast_hostport, hostport=None, handler=None, ttl=32 ):
         '''
         Constructor
         '''
         self.__mcast_hostport = mcast_hostport
         self.__ttl = ttl
-        super(McastServer, self).__init__(hostport, handler)
+        if hostport is None:
+            hostport = socket.gethostbyname(socket.gethostname())
+        super(McastServer, self).__init__(hostport, handler, handler is not None)
         
     @property
     def grpaddr ( self ):
@@ -59,18 +61,33 @@ class McastServer(UDPServer):
         Overloads the base UDPServer.server_bind() method to set the necessary socket options
         that properly enable multicast sending and receiving.
         '''
-        self.allow_reuse_address = True
+        # Don't need this, it's done by allow_reuse_address = True
         #self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.__ttl)
-        self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        self.allow_reuse_address = True
+        
+        # These options are required for sending only
+        self.socket.setsockopt(socket.SOL_IP, socket.IP_MULTICAST_TTL, self.__ttl)
+        self.socket.setsockopt(socket.SOL_IP, socket.IP_MULTICAST_LOOP, 1)
 
-        result = super(McastServer, self).server_bind()
-        
+        # Call the superclass' server_bind(). On Windows, binding must be to the local address
+        # while on Linux binding must be to the multicast address; thus, in the latter case we
+        # overwrite self.server_address before calling super().server_bind() and restore it to
+        # its previous value before returning.
+        local_address = self.server_address
+        if platform.system() == 'Linux':
+                self.server_address = self.__mcast_hostport
+                
+        super(McastServer, self).server_bind()
+        self.server_address = local_address
+
+        # Multicast group subscription
         mreq = pack("4s4s", socket.inet_aton(self.__mcast_hostport[0]), socket.inet_aton(self.server_address[0]))
-        self.socket.setsockopt(socket.SOL_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        self.socket.setsockopt(socket.SOL_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.server_address[0]))
+        result = \
+            self.socket.setsockopt(socket.SOL_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.server_address[0])) or \
+            self.socket.setsockopt(socket.SOL_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         
-        return result
+        if result is not None:
+            raise socket.error("Problem setting multicast socket options: %d" % socket.errno)
     
     def send ( self, dgram ):
         '''
@@ -783,9 +800,10 @@ class ProtocolAgent(type):
         if send is not None:
             d['send'] = ProtocolAgent.jsonencoded(send)
         else:
-            d['send'] = lambda s, m, d: \
-                print("Automatically-generated no-op %s.send() method: msg=%s, dst=%s" % \
-                (type(s).__name__, str(m), str(d)))
+            d['send'] = lambda s, m, d: None
+            #d['send'] = lambda s, m, d: \
+            #    print("Automatically-generated no-op %s.send() method: msg=%s, dst=%s" % \
+            #    (type(s).__name__, str(m), str(d)))
     
     @staticmethod
     def __addgenericjsonhandler ( d ):
@@ -872,6 +890,13 @@ class ProtocolAgent(type):
 
     @staticmethod
     def local ( cls ):
+        '''
+        A class decorator to support communication between agents within the same Python interpreter.
+        Usage:
+            @ProtocolAgent.local
+            class A:
+                ...
+        '''
         class LocalLink ( object ):
             def send ( self, msg, dst ):
                 dst.handle(msg, self)
@@ -887,6 +912,13 @@ class ProtocolAgent(type):
                 
     @staticmethod
     def UDP ( cls ):
+        '''
+        A class decorator to support communication between agents through UDP.
+        Usage:
+            @ProtocolAgent.UDP
+            class B:
+                ...
+        '''
         class UDPHandler(BaseRequestHandler):
             def handle ( self ):
                 data = self.request[0].strip()
@@ -911,6 +943,13 @@ class ProtocolAgent(type):
     
     @staticmethod
     def TCP ( cls ):
+        '''
+        A class decorator to support communication between agents using TCP.
+        Usage:
+            @ProtocolAgent.TCP
+            class C:
+                ...
+        '''
         class TCPHandler(BaseRequestHandler):
             def handle ( self ):
                 sock = self.request
@@ -984,6 +1023,13 @@ class ProtocolAgent(type):
     
     @staticmethod
     def RMcast ( cls ):
+        '''
+        A class decorator to support communication between agents using reliable multicast.
+        Usage:
+            @ProtocolAgent.RMcast
+            class D:
+                ...
+        '''
         class wrapper(cls, RMcastServer, metaclass=ProtocolAgent):
             def __init__ ( self, mcast_hostport, hostport, ttl=32, station_id=cls.__name__, *args, **kwargs ):
                 # Notice the handler argument to RMcastServer constructor is not a handler in the
@@ -999,14 +1045,14 @@ class ProtocolAgent(type):
         return wrapper
 
 
-class RepeatableTimer ( Timer ):
+class RepeatableTimer ( _Timer ):
     FOREVER = -1
     
     def __init__ ( self, interval, function, args=(), kwargs={}, count=-1):
         super(RepeatableTimer, self).__init__(interval, function, args, kwargs)
         self.__count = count
-        if count == RepeatableTimer.FOREVER:
-            self.daemon = True
+        #if count == RepeatableTimer.FOREVER:
+        #    self.daemon = True
         
     def run ( self ):
         while self.__count != 0:
@@ -1221,14 +1267,16 @@ class LogicalClockServer(object):
         '''
         if self.startingup:
             self.__startingup -= 1
-            print("LogicalClockServer at %s, waiting %d heart-beats for state transfer..." % (self.id, self.__startingup))
+            logger.debug(\
+                "LogicalClockServer at %s, waiting %d heart-beats for state transfer...",
+                self.id, self.__startingup)
             if not self.startingup:
                 # Here we might meet any of the following situations:
                 # 1) We're alone so no-one has transferred/is transferring state to us
                 # 2) Someone has started transferring state to us but transfer is not done yet
                 # 3) Someone transferred state to us and transfer is complete
                 if len(self.__agent.peers) == 0:
-                    print("LogicalClockServer at %s, giving up on state transfer" % self.id)
+                    logger.debug("LogicalClockServer at %s, giving up on state transfer", self.id)
                     self.__agent.shutdown()
         
     def updclknstatus ( self, msg, src ):
