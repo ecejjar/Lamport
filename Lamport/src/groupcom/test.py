@@ -52,7 +52,7 @@ class ServerTest(unittest.TestCase):
             print("%s: unknown error of type %d notified by lower layer" % (type(self).__name__, type_))
 
     def notify ( self, elector ):
-        print("Elector at %s notifies its current leader is %d" % (elector.server_address, elector.leader))
+        print("Elector at %s notifies its current leader is %s" % (elector.server_address, elector.leader))
         self.__leader[elector.server_address] = elector.leader
                         
     @unittest.skip("Unfinished")
@@ -315,7 +315,6 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(server.duprcvd, "Lossless RMcast server test failed")
         self.assertCountEqual(self.__msgq, [msg(seq) for seq in range(1,11)], "Lossless RMcast server test failed")
         
-    @unittest.skip("Unfinished")
     def testProtocolAgent ( self ):
         def testfunc ( s, testmsgs ):
             for msg in testmsgs: s.send(msg, s.address())
@@ -347,11 +346,8 @@ class ServerTest(unittest.TestCase):
             
             @ProtocolAgent.handles('TestMsg')
             def testHandler ( self, msg, src ):
-                self.mutex.acquire()
-                try:
+                with self.mutex:
                     self.append(msg)
-                finally:
-                    self.mutex.release()
         
             def closed ( self, peer ):
                 print("Peer %s closed connection" % str(peer))
@@ -361,19 +357,21 @@ class ServerTest(unittest.TestCase):
         port = 2011
         agent = AgentTestRemote1((host, port))
         try:
-            Timer(3, faketestfunc, args=(agent,testmsgs)).start()
+            Timer(3, testfunc, args=(agent,testmsgs)).start()
             agent.serve_forever()
             self.assertListEqual(testmsgs, list(agent), "Lists not equal")
         finally:
-            agent.socket.close()
+            agent.close()
 
         @ProtocolAgent.UDP
         class AgentTestRemote2 ( deque ):
             TestMsg = namedtuple('TestMsg', 'a,b')
+            mutex = Lock()
                 
             @ProtocolAgent.handles('TestMsg')
             def testHandler ( self, msg, src ):
-                self.append(msg)
+                with self.mutex:
+                    self.append(msg)
         
         testmsgs = [AgentTestRemote2.TestMsg(a=1, b='Hi'), AgentTestRemote2.TestMsg(a=2, b='there!')]
         host = socket.gethostbyname(self.__hostaddr)
@@ -389,10 +387,12 @@ class ServerTest(unittest.TestCase):
         @ProtocolAgent.RMcast
         class AgentTestRemote3 ( deque ):
             TestMsg = namedtuple('TestMsg', 'a,b')
+            mutex = Lock()
             
             @ProtocolAgent.handles('TestMsg')
             def testHandler ( self, msg, src ):
-                self.append(msg)
+                with self.mutex:
+                    self.append(msg)
         
         testmsgs = [AgentTestRemote3.TestMsg(a=1, b='Hi'), AgentTestRemote3.TestMsg(a=2, b='there!')]
         host = socket.gethostbyname(self.__hostaddr)
@@ -488,6 +488,7 @@ class ServerTest(unittest.TestCase):
         # compare the values
         reduce(lambda a,b: self.assertMultiLineEqual(a,b) or a, out)
         
+    @unittest.skip("Unfinished")
     def testLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -495,9 +496,10 @@ class ServerTest(unittest.TestCase):
         NUM_OF_PEERS = 5 #10
         BASE_PORT = 2000
         host = socket.gethostbyname(self.__hostaddr)
+        d = 0.2
         
         addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
-        peers = [LeaderElection.LeaderElector(addr, peers=addresses, timeout=0.1, observer=self) \
+        peers = [LeaderElection.LeaderElector(addr, peers=addresses, timeout=d, observer=self) \
                  for addr in addresses]
         threads = [Thread(target=testfunc, args=(peer,), name="LeaderElector@%s:%d" % peer.server_address) \
                    for peer in peers]
@@ -554,9 +556,9 @@ class ServerTest(unittest.TestCase):
         M = 2   # The arbitrarily long time that link to&from peer 2 delays messages
         
         addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
-        peers = [LeaderElection.StableLeaderElector(addr, peers=addresses, timeout=d, observer=self) \
+        peers = [LeaderElection.StableLeaderElector(addr, peers=addresses, timeout=d, observer=self)
                  for addr in addresses]
-        threads = [Thread(target=testfunc, args=(peer,), name="StableLeaderElector@%s:%d" % peer.server_address) \
+        threads = [Thread(target=testfunc, args=(peer,), name="StableLeaderElector@%s:%d" % peer.server_address)
                    for peer in peers]
         #addresses = map(lambda port: (host, port), range(BASE_PORT, BASE_PORT+NUM_OF_PEERS))
         #peers = map(lambda addr: LeaderElection.StableLeaderElector(addr, peers=addresses, timeout=0.1, observer=self), addresses)
@@ -592,13 +594,69 @@ class ServerTest(unittest.TestCase):
         # The outcome is that 0 is demoted and 1 promoted without apparent reason!!
         peers[2].handle = delayed(peers[2].handle)
         peers[2].send = delayed(peers[2].send)
-        peers[2].startRound = crashing(peers[2].startRound)
+        #peers[2].startRound = crashing(peers[2].startRound)
 
         try:
             print("Starting %d stable leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
             for thread in threads: thread.start()
             print("Waiting for electors to agree on a leader, you should see some console messages...")
             sleep(M/2)
+            l = next(iter(self.__leader.values()))
+            self.assertSameElements(
+                addresses, self.__leader.keys(),
+                "Something went wrong, some elector didn't notify its observer")
+            self.assertListEqual(
+                [l]*2, list((self.__leader[addresses[0]], self.__leader[addresses[1]])),
+                "Something went wrong, peer 0 has been demoted")
+            self.assertEquals(
+                None, self.__leader[addresses[2]],
+                "Something went wrong, peer 2 picked a leader")
+            self.assertListEqual(
+                [l]*(NUM_OF_PEERS-3),
+                list(map(lambda p: p[1], filter(lambda p: p[0] in addresses[3:], self.__leader.items()))),
+                "Something went wrong, peer 0 has been demoted")
+            print("Electors agreed on peer %d" % l)
+            sleep(M/2+1)
+            # We cannot make any guarantee here. Some peer might be in the process of electing its leader
+            # hence it shall have reported None as current leader. 
+            #l = next(iter(self.__leader.values()))
+            #self.assertListEqual(
+            #    [l]*(NUM_OF_PEERS-1),
+            #    list(map(lambda p: p[1], filter(lambda p: p[0] != addresses[2], self.__leader.items()))),
+            #    "Something went wrong after M seconds, working peers didn't agree on the same leader")
+            del(peers[2].handle)
+            del(peers[2].send) 
+            sleep(M+2)  # need to wait at least M/2+M/2+1 for all pending messages from peer 2 to arrive
+            l = next(iter(self.__leader.values()))
+            self.assertListEqual(
+                [l]*NUM_OF_PEERS, list(self.__leader.values()),
+                "Something went wrong, some elector disagreed in who's leader")
+        finally:
+            print("Shutting down all electors")
+            for peer in peers:
+                peer.shutdown()
+                peer.socket.close()
+
+    def testOnStableLeaderElection ( self ):
+        def testfunc ( s ):
+            s.serve_forever()
+            
+        NUM_OF_PEERS = 5
+        BASE_PORT = 2000
+        host = socket.gethostbyname(self.__hostaddr)
+        d = 0.2
+        
+        addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
+        peers = [LeaderElection.OnStableLeaderElector(addr, peers=addresses, timeout=d, observer=self) \
+                 for addr in addresses]
+        threads = [Thread(target=testfunc, args=(peer,), name="StableLeaderElector@%s:%d" % peer.server_address) \
+                   for peer in peers]
+
+        try:
+            print("Starting %d O(n) stable leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
+            for thread in threads: thread.start()
+            print("Waiting for electors to agree on a leader (%d+4 times %d), you should see some console messages..." % (NUM_OF_PEERS, d))
+            sleep(2)
             l = next(iter(self.__leader.values()))
             self.assertNotIn(
                 None, self.__leader.values(),
@@ -610,16 +668,50 @@ class ServerTest(unittest.TestCase):
                 [l]*NUM_OF_PEERS, list(self.__leader.values()),
                 "Something went wrong, some elector disagreed in who's leader")
             print("Electors agreed on peer %d" % l)
-            sleep(M/2)
-            self.assertListEqual(
-                [0]*NUM_OF_PEERS, list(self.__leader.values()),
-                "Something went wrong after M seconds, either some elector disagreed in who's leader or electors failed-over to process 1")
         finally:
             print("Shutting down all electors")
             for peer in peers:
                 peer.shutdown()
                 peer.socket.close()
+        
+    @unittest.skip("Unfinished")
+    def testO1StableLeaderElection ( self ):
+        def testfunc ( s ):
+            s.serve_forever()
+            
+        NUM_OF_PEERS = 5
+        BASE_PORT = 2000
+        host = socket.gethostbyname(self.__hostaddr)
+        d = 0.2
+        
+        addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
+        peers = [LeaderElection.O1StableLeaderElector(addr, peers=addresses, timeout=d, observer=self) \
+                 for addr in addresses]
+        threads = [Thread(target=testfunc, args=(peer,), name="StableLeaderElector@%s:%d" % peer.server_address) \
+                   for peer in peers]
 
+        try:
+            print("Starting %d O(1) stable leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
+            for thread in threads: thread.start()
+            print("Waiting for electors to agree on a leader (6 times %d), you should see some console messages..." % d)
+            sleep(2)
+            l = next(iter(self.__leader.values()))
+            self.assertNotIn(
+                None, self.__leader.values(),
+                "Something went wrong, some elector has None as leader")
+            self.assertSameElements(
+                addresses, self.__leader.keys(),
+                "Something went wrong, some elector didn't notify its observer")
+            self.assertListEqual(
+                [l]*NUM_OF_PEERS, list(self.__leader.values()),
+                "Something went wrong, some elector disagreed in who's leader")
+            print("Electors agreed on peer %d" % l)
+        finally:
+            print("Shutting down all electors")
+            for peer in peers:
+                peer.shutdown()
+                peer.socket.close()
+        
 if __name__ == "__main__":
     #import sys;sys.argv = ['', 'Test.testMcastServer ']
     unittest.main()

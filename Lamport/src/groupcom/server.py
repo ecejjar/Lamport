@@ -773,20 +773,30 @@ class RMcastServer(McastServer):
 
 
 class ProtocolAgent(type):
-    def __new__(cls, name, bases, d):
-        ProtocolAgent.__addaliases(bases, d)
+    '''
+    A meta-class for classes intended to talk over some communication means.
+    Currently supports communication over:
+        - local memory (classes running within the same Python interpreter)
+        - TCP
+        - UDP
+        - Reliable multi-cast (using the RMcastServer implementation in this module)
+    '''
+    def __new__ ( cls, name, bases, d ):
+        '''
+        Builds the agent class
+        '''
+        ProtocolAgent.__addmsghandlers(bases, d)
         ProtocolAgent.__decoratesend(bases, d)
         ProtocolAgent.__addgenericjsonhandler(d)
         ProtocolAgent.__exportprivate(bases, d)
         return type.__new__(cls, name, bases, d)
 
     @staticmethod
-    def __addaliases ( bases, d ):
-        aliases = [(m.msgname+'Handler', m) for b in bases for m in b.__dict__.values() if hasattr(m, 'msgname')]
-        d.update(aliases)
-    
-    @staticmethod
     def __searchbases ( bases, name ):
+        '''
+        Searches the base classes' dictionaries for the value
+        bound to the first key matching the input argument 'name'.
+        '''
         dicts = map(lambda b: b.__dict__, bases)
         m = map(lambda d: d.get(name), filter(lambda d: name in d, dicts))
         try:
@@ -795,9 +805,28 @@ class ProtocolAgent(type):
             return None
 
     @staticmethod
+    def __addmsghandlers ( bases, d ):
+        '''
+        Adds to the class' dictionary any method having a 'msgname' attribute in a base class;
+        those methods can be tagged in base classes using the 'handles(msg)' decorator.
+        Each method is bound to a name of the form <msg>Handler and is called by the generic JSON
+        handler mentioned in class method __addgenericjsonhandler(). 
+        '''
+        handlers = [
+            (m.msgname+'Handler', m)
+            for b in bases for m in b.__dict__.values()
+            if hasattr(m, 'msgname') and callable(m)
+        ]
+        d.update(handlers)
+    
+    @staticmethod
     def __decoratesend ( bases, d ):
+        '''
+        Decorates the first 'send' method found in base classes by wrapping it into
+        the jsonencoded() method.
+        '''
         send = d.get('send', ProtocolAgent.__searchbases(bases, 'send'))
-        if send is not None:
+        if send is not None and callable(send):
             d['send'] = ProtocolAgent.jsonencoded(send)
         else:
             d['send'] = lambda s, m, d: None
@@ -807,6 +836,10 @@ class ProtocolAgent(type):
     
     @staticmethod
     def __addgenericjsonhandler ( d ):
+        '''
+        Adds a handler method that calls the right message handler method based on the
+        type of the message received.
+        '''
         def defaulthandler ( self, message, src ):
             '''
             Called when there is no handler defined for a message.
@@ -847,7 +880,15 @@ class ProtocolAgent(type):
         
     @staticmethod
     def __exportprivate ( bases, d ):
-        exported = [(m.__name__, m) for b in bases for m in b.__dict__.values() if hasattr(m, 'export')]
+        '''
+        Surfaces any method in a base class tagged with the 'export' attribute.
+        Methods in base classes can be tagged using the 'export' decorator.
+        '''
+        exported = [
+            (m.__name__, m)
+            for b in bases for m in b.__dict__.values()
+            if hasattr(m, 'export')
+        ]
         d.update(exported)
         
     @staticmethod
@@ -888,6 +929,22 @@ class ProtocolAgent(type):
             return sendfunc(self, bytes(jsonencodedmsg, 'utf8'), dst)
         return wrapper
 
+    def describe ( self ):
+        '''
+        Returns a string description of the agent class with messages, message handling methods,
+        and surfaced methods
+        '''
+        messages = \
+            map(lambda atr: "\t" + atr + "\n",
+                filter(lambda m: m.endswith("Msg"), self.__dict__.keys()))
+        handlers = \
+            map(lambda mth: "\t" + mth.__name__ + " handles " + mth.msgname + "\n",
+                filter(lambda m: hasattr(m, 'msgname'), self.__dict__.values()))
+        surfaced = \
+            map(lambda mth: "\t" + mth.__name__ + "\n",
+                filter(lambda m: hasattr(m, 'export'), self.__dict__.values()))
+        return "Name: %s\nMessages:\n%s\nHandlers:\n%s\nSurfaced:\n%s" % (self.__name__, messages, handlers, surfaced)
+    
     @staticmethod
     def local ( cls ):
         '''
@@ -937,7 +994,7 @@ class ProtocolAgent(type):
             
             def send ( self, msg, dst ):
                 # The method providing send() functionality in UDPServer is sendto()
-                self.socket.sendto(msg, dst)
+                return self.socket.sendto(msg, dst) < len(msg)
 
         return wrapper
     
@@ -954,7 +1011,7 @@ class ProtocolAgent(type):
             def handle ( self ):
                 sock = self.request
                 peer = sock.getpeername()
-                if not peer in self.server.peers: self.server.addpeer(peer, sock)
+                if peer not in self.server.peers: self.server.addpeer(peer, sock)
                 try:
                     while True:
                         data = sock.recv(2)
@@ -967,7 +1024,7 @@ class ProtocolAgent(type):
                     self.server.delpeer(peer)
                     self.server.closed(peer)
                 except socket.error as msg:
-                    pass    # connection closed, possibly by ourselves calling shutdown()
+                    logger.warning("Error sending result message to remote peer %s, cause: %s" % (self.client_address, msg))
                 
         class ThreadingTCPServer(ThreadingMixIn, TCPServer): pass
         
@@ -982,18 +1039,12 @@ class ProtocolAgent(type):
             def peers ( self ): return self.__peers
             
             def addpeer ( self, address, sock ):
-                self.__peersmutex.acquire()
-                try:
+                with self.__peersmutex:
                     self.__peers[address] = sock
-                finally:
-                    self.__peersmutex.release()
                     
             def delpeer ( self, address ):
-                self.__peersmutex.acquire()
-                try:
+                with self.__peersmutex:
                     del self.__peers[address]
-                finally:
-                    self.__peersmutex.release()
                     
             def address ( self ):
                 return self.server_address
@@ -1008,16 +1059,33 @@ class ProtocolAgent(type):
                 try:
                     sock = self.__peers[dst]
                 except KeyError:
-                    # create a connection to dst
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    #sock.bind((self.address[0], self.address[1]+len(self.__peers)+1))
-                    sock.connect(dst)
-                    self.addpeer(dst, sock)
-                sock.send(bytes((len(msg) >> 8, len(msg) & 0xFF)) + msg)
+                    with self.__peersmutex:
+                        # Two threads executing this block in sequence shall create two
+                        # connections to the same dest. Hence before actually creating the
+                        # connection we need to check if another thread has created it already.
+                        if not dst in self.__peers:
+                            # create a connection to dst
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            #sock.bind((self.address[0], self.address[1]+len(self.__peers)+1))
+                            sock.connect(dst)
+                            self.__peers[dst] = sock
+                            
+                # Notice socket.send() returns the actual number of bytes sent, which may be smaller
+                # than the number of bytes we want to send; we're responsible for sending the remaining
+                # bytes. With current TCP window sizes however it's highly unlikely that fragmented TCP
+                # segment delivery takes place so we try to send everything first, and only if not all
+                # was sent we enter the delivery loop that copies the message buffer due to slicing.
+                enc_msg = bytes((len(msg) >> 8, len(msg) & 0xFF)) + msg
+                bytes_remaining = len(enc_msg) - sock.send(enc_msg)
+                while bytes_remaining:
+                    bytes_remaining = bytes_remaining - sock.send(enc_msg[len(enc_msg)-bytes_remaining:])
             
-            def shutdown ( self ):
-                for sock in self.__peers.values(): sock.close()
-                return TCPServer.shutdown(self) 
+            def close ( self ):
+                # We need to protect ourselves from the handler class removing
+                # a peer while we're iterating over the list
+                with self.__peersmutex:
+                    for addr in self.__peers: self.__peers[addr].close()
+                self.socket.close()
             
         return wrapper
     
@@ -1051,8 +1119,6 @@ class RepeatableTimer ( _Timer ):
     def __init__ ( self, interval, function, args=(), kwargs={}, count=-1):
         super(RepeatableTimer, self).__init__(interval, function, args, kwargs)
         self.__count = count
-        #if count == RepeatableTimer.FOREVER:
-        #    self.daemon = True
         
     def run ( self ):
         while self.__count != 0:
