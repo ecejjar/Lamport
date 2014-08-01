@@ -840,13 +840,12 @@ class ProtocolAgent(type):
         Adds a handler method that calls the right message handler method based on the
         type of the message received.
         '''
-        def defaulthandler ( self, message, src ):
+        def defaulthandler ( self, msg, src ):
             '''
             Called when there is no handler defined for a message.
             Can be re-implemented in derived classes.
             '''
-            msgname, msgval = message.decode().split(':', 1)
-            print("%s.defaulthandler: no handler found for message '%s' received from %s" % (type(self).__name__, msgname, src))
+            print("%s.defaulthandler: no handler found for message '%s' received from %s" % (type(self).__name__, msg, src))
         
         def unknownhandler ( self, message, src ):
             '''
@@ -863,14 +862,12 @@ class ProtocolAgent(type):
             method 'self.<msgname>Handler()', where <msgname> is the message name received
             at the heading of the message.
             '''
+            MyCls = type(self)
             msgname, msgval = message.decode().split(':', 1)
-            if msgname in dir(type(self)):
-                MsgType = type(self).__bases__[0].__dict__[msgname]
+            if msgname in dir(MyCls):
+                MsgType = MyCls.__bases__[0].__dict__[msgname]
                 msg = MsgType(**json.loads(msgval))
-                try:   
-                    return type(self).__dict__[msgname + 'Handler'](self, msg, src)
-                except KeyError:
-                    return self.defaulthandler(message, src)
+                MyCls.__dict__.get(msgname + 'Handler', MyCls.defaulthandler)(self, msg, src)
             else:
                 return self.unknownhandler(message, src)
             

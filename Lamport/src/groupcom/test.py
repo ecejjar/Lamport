@@ -11,11 +11,14 @@ from threading import  Thread, Timer, Lock
 from time import sleep
 from collections import deque, namedtuple
 from functools import reduce, wraps
+from itertools import count
 import unittest
 import socket
 import os
 import re
 import logging
+import random
+import time
 
 if not hasattr(unittest, 'skip'):
     unittest.skip = lambda func: func   # Python 3.0 and lower
@@ -637,11 +640,63 @@ class ServerTest(unittest.TestCase):
                 peer.shutdown()
                 peer.socket.close()
 
+    def testExpiringLinks ( self ):
+        BASE_PORT = 2000
+        host = socket.gethostbyname(self.__hostaddr)
+        peer = (host, BASE_PORT)
+        explinks = LeaderElection.ExpiringLinksImpl()
+        d = 0.2             # delay mu
+        j = 0.01            # delay sigma
+        t = time.time()+1   # offset mu (the +1 is necessary b/c RepeatableTimer won't trigger until the 1st time-out)
+        e = 0.01            # offset sigma (drift)
+        n = 10              # number of samples
+        
+        self.assertEqual(
+            explinks.O(peer), LeaderElection.ExpiringLinksImpl.NO_INFO.offset,
+            "ExpiringLinksImpl clock offset estimation for unknown peer not equal to NO_INFO.offset")
+        self.assertEqual(
+            explinks.D(peer), LeaderElection.ExpiringLinksImpl.NO_INFO.delay,
+            "ExpiringLinksImpl network delay estimation for unknown peer not equal to NO_INFO.delay")
+        
+        # Prefab random network delays following normal distribution
+        delays = [max(0.01, random.gauss(d,j)) for k in range(2*n)]
+
+        print("Sending 1 ack message per second for 10s, please wait...")
+        
+        it = count()
+        def testfunc ( e ):
+            '''
+            OK, here's the deal: the ExpiringLinksImpl class uses current time to measure O and D;
+            therefore we need to adjust all the times so the simulation matches what we want to simulate:
+            * sender issues one Start message every second (actual time includes local clock drift)
+            * receiver's clock starts at t (i.e. it is 0 at instant t, t is set on method entrance)
+            * receiver always takes the same time to send the Ack: 0.01s
+            Delays for every message/ack exchange are taken from a prefab sample.
+            '''
+            k = next(it)
+            msg = LeaderElection.OnStableLeaderElector.StartMsg(time.time(), 0)
+            sleep(delays[k])
+            o = time.time()-t
+            sleep(0.01)
+            l = time.time()-t
+            ack = LeaderElection.OnStableLeaderElector.AckMsg(l, msg.timestamp, o, 0)
+            sleep(delays[-k])
+            print("Received Ack(ts=%f,msg_ts=%f,msg_rcv_ts=%f,round=%d) at %f" % (ack + (time.time(),)))
+            return LeaderElection.ExpiringLinksImpl.processAckTimestamp(e, ack, peer)
+        RepeatableTimer(1, testfunc, (explinks,), {}, n).start()
+        sleep(n+2)
+        self.assertTrue(
+            d-3*j <= explinks.D(peer).avg and explinks.D(peer).avg <= d+3*j,
+            "Estimated network delay not within three stddev from average %f: %f" % (d, explinks.D(peer).avg))
+        self.assertTrue(
+            t-3*e <= abs(explinks.O(peer).avg) and abs(explinks.O(peer).avg) <= t+3*e,
+            "Estimated clock offset not within three stddev from average %f: %f" % (t, explinks.O(peer).avg))
+
     def testOnStableLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
             
-        NUM_OF_PEERS = 5
+        NUM_OF_PEERS = 2
         BASE_PORT = 2000
         host = socket.gethostbyname(self.__hostaddr)
         d = 0.2
