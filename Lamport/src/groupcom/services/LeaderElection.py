@@ -62,6 +62,8 @@ class LeaderElectorBase(object):
         self.__peers = list(peers) or [self.server_address]
         self.__round = 0
         self.__leader = None
+        if not hasattr(observer, 'notify') or not callable(observer.notify):
+            raise ValueError("observer does not have a notify() method")
         self.__observer = observer
         self.__timer = None
         self.__task0 = server.RepeatableTimer(self.__timeout/2, type(self).task0, args=(self,))
@@ -111,6 +113,10 @@ class LeaderElectorBase(object):
             logger.warning(
                 "Exception in observer when process %d notified its current leader is %s: %s",
                 self.p, p, e)
+
+    @property
+    def peers ( self ):
+        return self.__peers
         
     @property
     def timer0 ( self ):
@@ -133,23 +139,7 @@ class LeaderElectorBase(object):
                 self.__timer.cancel()
         self.__timer = Timer(self.__timeout, type(self).task1, args=(self,))
         self.__timer.start()
-    
-    def commonStartMessageHandling ( self, msg, src ):
-        logger.debug(\
-            "%s: process %d received Start message for round %d from peer at %s",
-            type(self).__name__, self.p, msg.round, src )
-        if src not in self.__peers: self.__peers.add(src)
-    
-    def commonOkMessageHandling ( self, msg, src ):
-        logger.debug(\
-            "%s: process %d received Ok message for round %d from peer at %s",
-            type(self).__name__, self.p, msg.round, src )
-        
-        if src not in self.__peers:
-            logger.warning("Peer %d received message %s from unknown peer %s", self.p, msg, src)
-            return False
-        
-        return True
+
     
 @server.ProtocolAgent.UDP
 class LeaderElector(object):
@@ -1013,16 +1003,21 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
     '''Stores round and local time of the AlertMsg with the highest round value received''' 
     LastAlertInfo = namedtuple("LastAlert", "round, time")
     
-    def __init__ ( self, peers = [], timeout = 0.2, observer = None ):
+    def __init__ ( self, peers = [], timeout = 0.2, ackratio =0.1, observer = None ):
         '''
         Constructor
         @param peers: List of participating processes (process addresses)
         @param timeout: Time between leadership checks, should be greater than D+2*SDEV(D)
         @param observer: An object that shall be notified when the current leader changes
         '''
-        super(O1StableLeaderElector, self).__init__(peers, timeout, observer)
+        LeaderElectorBase.__init__(self, peers, timeout, observer)
+        ExpiringLinksImpl.__init__(self)
+        if ackratio <= 0 or ackratio >= 1:
+            raise ValueError("ackratio must be greater than 0 and lower than 1")
+        self.__ackratio = ackratio
         self.__okcount = 0
-        self.__lastalert = O1StableLeaderElector.LastAlertInfo(0, 0) 
+        self.__okslefttoack = 1 # This causes the first Ok to be ack'ed
+        self.__lastalert = type(self).LastAlertInfo(0, 0) 
         #...
         
     def startRound ( self, s ):
@@ -1034,18 +1029,18 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         Re-starts the timer governing task 1.
         @param s: Number of the round to start
         '''
+        if s < 0: raise ValueError("s must be greater or equal 0")
         l = s % self.n
-        logger.debug(\
+        logger.debug(
             "%s: process %d in %d starting round %d with peer %d %s",
-            type(self).__name__, self.p, self.n, s, l, str(self.__peers[l]) )
+            type(self).__name__, self.p, self.n, s, l, self.peers[l] )
         if self.p != l:
-            rcvrlist = map(lambda rcvr: self.send(type(self).StartMsg(time(), s), rcvr), self.__peers)
+            rcvrlist = map(lambda rcvr: self.send(type(self).StartMsg(time(), s), rcvr), self.peers)
             try:
                 if any(rcvrlist):
                     logger.error("Peer %d failed sending OK to one or more peers")
             except Exception as e:
                 logger.error("Peer %d failed sending OK to one or more peers, error: ", e)
-            #self.restartTimer1()
         self.__round = s
         self.leader = None
         self.restartTimer()
@@ -1055,12 +1050,12 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         If I'm leader send OK to everyone. This method is called every self.__timeout seconds.
         '''
         if self.p == self.r % self.n:
-            logger.debug(\
+            logger.debug(
                 "%s: leader process %d sending OK to %d peers",
                 type(self).__name__, self.p, self.n )
             rcvrlist = map(
                 lambda rcvr: self.send(type(self).OkMsg(time(), self.O(rcvr), self.D(rcvr), self.r), rcvr),
-                self.__peers)
+                self.peers)
             try:
                 if any(rcvrlist):
                     logger.error("Peer %d failed sending OK to one or more peers")
@@ -1077,6 +1072,15 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
             "%s: process %d timed-out on round %d", type(self).__name__, self.p, self.r)
         self.startRound(self.r + 1)
 
+    def sendAckIfNeeded ( self, msg_rcv_ts, msg, src ):
+        '''
+        Checks if an Ack is to be sent to the current leader
+        '''
+        self.__okslefttoack -= 1
+        if not self.__okslefttoack:
+            self.__okslefttoack = 1 // self.__ackratio
+            self.send(type(self).AckMsg(time(), msg.timestamp, msg_rcv_ts, self.r), src)
+
     @server.ProtocolAgent.handles('StartMsg')        
     def handleStartMessage ( self, msg, src ):
         '''
@@ -1090,12 +1094,21 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         behavior is in fact a Lamport clock, hence it causes a total
         ordering of rounds across all the processes).
         '''
-        self.commonStartMessageHandling(msg, src)
+        logger.debug(\
+            "%s: process %d received Start message for round %d from peer at %s",
+            type(self).__name__, self.p, msg.round, src )
+
+        if self.discard(msg, src):
+            logger.debug("Discarding Start message from peer %s with timestamp %f", src, msg.timestamp)
+            return
+        
+        if src not in self.peers: self.peers.add(src)
         k = msg.round
         if k > self.r:
             self.startRound(k)
         elif k < self.r:
-            self.send(type(self).StartMessage(self.r), src)
+            self.send(type(self).StartMessage(time(), self.r), src)
+            #return type(self).StartMessage(time(), self.r) should work
                         
     @server.ProtocolAgent.handles('OkMsg')        
     def handleOkMessage ( self, msg, src ):
@@ -1110,17 +1123,30 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         If the message is calling for a round higher than this process'
         current round, start the round called for by the message.
         '''
-        if not self.commonOkMessageHandling(msg, src):
+        
+        # Log the message reception time
+        msg_rcv_ts = time()
+        
+        logger.debug(\
+            "%s: process %d received Ok message for round %d from peer at %s",
+            type(self).__name__, self.p, msg.round, src )
+        
+        if src not in self.peers:
+            logger.warning("Peer %d received message %s from unknown peer %s", self.p, msg, src)
             return
 
-        if self.handleMessageTimestamp(self, msg, src):
+        # Consider the latest leader estimation before deciding if discard a message
+        self.processOkTimestamp(msg, src)
+        
+        if self.discard(msg, src):
+            logger.debug("Discarding Ok message from peer %s with timestamp %f", src, msg.timestamp)
             return
         
         k = msg.round
         if k == self.r:
             self.__okcount += 1
-            if self.leader is None and self.__okcount >= 2 \
-              and self.__lastalert.round > k and time() - self.__lastalert.time > 6*self.__timeout :
+            if self.leader is None and self.__okcount >= 2 and \
+              ( time() - self.__lastalert.time > 6*self.d or self.__lastalert.round <= k):
                 self.__okcount = 0
                 self.leader = k % self.n
             self.restartTimer()
@@ -1129,6 +1155,9 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
             self.startRound(k)
         else: # hence k < self.r
             self.send(type(self).StartMessage(time(), self.r), src)
+        
+        # Tell the leader about our timings
+        self.sendAckIfNeeded(msg_rcv_ts, msg, src)
 
     @server.ProtocolAgent.handles('AlertMsg')
     def handleAlertMsg ( self, msg, src ):
@@ -1136,20 +1165,38 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
             "%s: process %d received Alert message for round %d from peer at %s",
             type(self).__name__, self.p, msg.round, src )
 
-        if src not in self.__peers:
+        if self.discard(msg, src):
+            logger.debug("Discarding Alert message from peer %s with timestamp %f", src, msg.timestamp)
+            return
+        
+        if src not in self.peers:
             logger.warning("Peer %d received message %s from unknown peer %s", self.p, msg, src)
             return
 
-        if self.handleMessageTimestamp(self, msg, src):
-            return
-        
         k = msg.round
         if k > self.r:
             self.leader = None
             
         # In tuple comparison, the element with the lowest index weighs the most
-        self.__lastalert = max(O1StableLeaderElector.LastAlertInfo(k, time()), self.__lastalert)
+        self.__lastalert = max(type(self).LastAlertInfo(k, time()), self.__lastalert)
 
+    @server.ProtocolAgent.handles('AckMsg')        
+    def handleAckMessage ( self, msg, src ):
+        '''
+        Handler for the Ack message.
+        Delegates calculation of clock offset and network delay to ExpiringLinksImpl base class.
+        '''
+        logger.debug(\
+            "%s: process %d received Ack message for round %d from peer at %s",
+            type(self).__name__, self.p, msg.round, src )
+
+        if src not in self.peers:
+            logger.warning("Peer %d received message %s from unknown peer %s", self.p, msg, src)
+            return
+
+        # Acks from known peers are never discarded, they carry useful info
+        self.processAckTimestamp(msg, src)
+        
 O1StableLeaderElector.serve_forever = _serve_forever
 
 

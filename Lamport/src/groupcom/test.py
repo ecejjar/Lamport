@@ -5,7 +5,7 @@ Created on 20/02/2013
 '''
 
 from server import LogicalClockServer, McastServer, McastRouter, RMcastServer, SequencedMessage, ProtocolAgent, RepeatableTimer, StateXferAgent
-from services import LeaderElection 
+from services import LeaderElection, Paxos 
 from socketserver import BaseRequestHandler
 from threading import  Thread, Timer, Lock
 from time import sleep
@@ -58,7 +58,6 @@ class ServerTest(unittest.TestCase):
         print("Elector at %s notifies its current leader is %s" % (elector.server_address, elector.leader))
         self.__leader[elector.server_address] = elector.leader
                         
-    @unittest.skip("Unfinished")
     def testMcastServer ( self ):
         testData = bytes("Echo!", "utf8")
         def testfunc ( s ):
@@ -86,7 +85,6 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
             
-    @unittest.skip("Unfinished")
     def testMcastRouter ( self ):
         testData = "Echo!"
         port1, port2 = 2001, 2002
@@ -112,7 +110,6 @@ class ServerTest(unittest.TestCase):
             router.server1.socket.close()
             router.server2.socket.close()  
         
-    @unittest.skip("Unfinished")
     def testRMcastServer ( self ):
         testData = "Echo!"
         port = 2003
@@ -134,7 +131,6 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
             
-    @unittest.skip("Unfinished")
     def testRMcastServerOrdering ( self ):
         testData = "Echo!"
         port = 2004
@@ -157,7 +153,6 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
          
-    @unittest.skip("Unfinished")
     def testRMcastServerDiscardDups ( self ):
         testData = "Echo!"
         port = 2005
@@ -180,7 +175,6 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
 
-    @unittest.skip("Unfinished")
     def testRMcastServerNak ( self ):
         testData = "Echo!"
         port = 2006
@@ -204,7 +198,6 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
         
-    @unittest.skip("Unfinished")
     def testRMcastServerRestart ( self ):
         testData = "Echo!"
         port = 2007
@@ -230,7 +223,6 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
         
-    @unittest.skip("Unfinished")
     def testRMcastServerRestartNak ( self ):
         testData = "Echo!"
         port = 2007
@@ -257,7 +249,6 @@ class ServerTest(unittest.TestCase):
         finally:
             server.socket.close()
         
-    @unittest.skip("Unfinished")
     def testLosslessRMcastServer ( self ):
         testData = "Echo!"
         port = 2007
@@ -409,7 +400,6 @@ class ServerTest(unittest.TestCase):
         finally:
             agent.socket.close()
         
-    @unittest.skip("Unfinished")
     def testRepeatableTimer ( self ):
         testData = 'Hi there!'
         
@@ -429,7 +419,6 @@ class ServerTest(unittest.TestCase):
         
         self.__msgq.clear()
     
-    @unittest.skip("Unfinished")
     def testStateXferAgent ( self ):
         host = socket.gethostbyname(self.__hostaddr)
         port = 2007
@@ -446,7 +435,6 @@ class ServerTest(unittest.TestCase):
             agentB.shutdown()
             agentB.socket.close()
         
-    @unittest.skip("Unfinished")
     def testLogicalClockServer ( self ):
         testCommand = "echo"
         port = 2020
@@ -491,7 +479,6 @@ class ServerTest(unittest.TestCase):
         # compare the values
         reduce(lambda a,b: self.assertMultiLineEqual(a,b) or a, out)
         
-    @unittest.skip("Unfinished")
     def testLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -547,7 +534,6 @@ class ServerTest(unittest.TestCase):
                 peer.shutdown()
                 peer.socket.close()
 
-    @unittest.skip("Unfinished")
     def testStableLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -669,20 +655,22 @@ class ServerTest(unittest.TestCase):
             OK, here's the deal: the ExpiringLinksImpl class uses current time to measure O and D;
             therefore we need to adjust all the times so the simulation matches what we want to simulate:
             * sender issues one Start message every second (actual time includes local clock drift)
+            * sender's clock is the local clock
             * receiver's clock starts at t (i.e. it is 0 at instant t, t is set on method entrance)
-            * receiver always takes the same time to send the Ack: 0.01s
-            Delays for every message/ack exchange are taken from a prefab sample.
+            * receiver always takes the same time to send the Ack: 0.01s (plus some local drift)
+            Delays for every message/ack exchange are taken from a prefab normally-distributed sample.
             '''
             k = next(it)
             msg = LeaderElection.OnStableLeaderElector.StartMsg(time.time(), 0)
-            sleep(delays[k])
-            o = time.time()-t
-            sleep(0.01)
-            l = time.time()-t
+            sleep(delays[k])    # simulate network delay sender->receiver
+            o = time.time()-t   # here we received the message
+            sleep(0.01)         # simulate local processing at receiver
+            l = time.time()-t   # here we send the ack
             ack = LeaderElection.OnStableLeaderElector.AckMsg(l, msg.timestamp, o, 0)
-            sleep(delays[-k])
+            sleep(delays[-k])   # simulate network delay receiver->sender
             print("Received Ack(ts=%f,msg_ts=%f,msg_rcv_ts=%f,round=%d) at %f" % (ack + (time.time(),)))
             return LeaderElection.ExpiringLinksImpl.processAckTimestamp(e, ack, peer)
+        
         RepeatableTimer(1, testfunc, (explinks,), {}, n).start()
         sleep(n+2)
         self.assertTrue(
@@ -698,20 +686,20 @@ class ServerTest(unittest.TestCase):
             
         NUM_OF_PEERS = 2
         BASE_PORT = 2000
-        host = socket.gethostbyname(self.__hostaddr)
+        host = socket.gethostbyname(self.__hO1StableLeaderElectorostaddr)
         d = 0.2
         
         addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
-        peers = [LeaderElection.OnStableLeaderElector(addr, peers=addresses, timeout=d, observer=self) \
+        peers = [LeaderElection.OnStableLeaderElector(addr, peers=addresses, timeout=d, observer=self)
                  for addr in addresses]
-        threads = [Thread(target=testfunc, args=(peer,), name="StableLeaderElector@%s:%d" % peer.server_address) \
+        threads = [Thread(target=testfunc, args=(peer,), name="OnStableLeaderElector@%s:%d" % peer.server_address)
                    for peer in peers]
 
         try:
             print("Starting %d O(n) stable leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
             for thread in threads: thread.start()
-            print("Waiting for electors to agree on a leader (%d+4 times %d), you should see some console messages..." % (NUM_OF_PEERS, d))
-            sleep(2)
+            print("Waiting for electors to agree on a leader (%d+4 times %f), you should see some console messages..." % (NUM_OF_PEERS, d))
+            sleep((NUM_OF_PEERS+4)*d)
             l = next(iter(self.__leader.values()))
             self.assertNotIn(
                 None, self.__leader.values(),
@@ -729,27 +717,26 @@ class ServerTest(unittest.TestCase):
                 peer.shutdown()
                 peer.socket.close()
         
-    @unittest.skip("Unfinished")
     def testO1StableLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
             
-        NUM_OF_PEERS = 5
+        NUM_OF_PEERS = 2
         BASE_PORT = 2000
         host = socket.gethostbyname(self.__hostaddr)
         d = 0.2
         
         addresses = [(host, port) for port in range(BASE_PORT, BASE_PORT+NUM_OF_PEERS)]
-        peers = [LeaderElection.O1StableLeaderElector(addr, peers=addresses, timeout=d, observer=self) \
+        peers = [LeaderElection.O1StableLeaderElector(addr, peers=addresses, timeout=d, observer=self)
                  for addr in addresses]
-        threads = [Thread(target=testfunc, args=(peer,), name="StableLeaderElector@%s:%d" % peer.server_address) \
+        threads = [Thread(target=testfunc, args=(peer,), name="O1StableLeaderElector@%s:%d" % peer.server_address)
                    for peer in peers]
 
         try:
             print("Starting %d O(1) stable leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
             for thread in threads: thread.start()
-            print("Waiting for electors to agree on a leader (6 times %d), you should see some console messages..." % d)
-            sleep(2)
+            print("Waiting for electors to agree on a leader (6 times %f), you should see some console messages..." % d)
+            sleep(6*d)
             l = next(iter(self.__leader.values()))
             self.assertNotIn(
                 None, self.__leader.values(),
@@ -766,7 +753,14 @@ class ServerTest(unittest.TestCase):
             for peer in peers:
                 peer.shutdown()
                 peer.socket.close()
-        
+
+    @unittest.skip("Unfinished")
+    def testPaxos ( self ):
+        proposer = Paxos.Proposer()
+        acceptor = Paxos.Acceptor()
+        listener = Paxos.Listener()
+
+
 if __name__ == "__main__":
     #import sys;sys.argv = ['', 'Test.testMcastServer ']
     unittest.main()
