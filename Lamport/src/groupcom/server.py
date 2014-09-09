@@ -106,7 +106,8 @@ class McastBridgeHandler(BaseRequestHandler):
         if self.client_address != own_addr:
             #print("Routing message from %s to %s" % (self.client_address, self.server.peer.grpaddr))
             self.server.peer.send(self.request[0])
-    
+
+
 class McastBridge(McastServer):
     '''
     A multicast server that pushes received data through a peer server
@@ -122,6 +123,7 @@ class McastBridge(McastServer):
     def removePeer ( self ):
         del self.__peer
     peer = property(getPeer, setPeer, removePeer)
+
     
 class McastRouter(object):
     '''
@@ -210,10 +212,10 @@ class SequencedMsgSndQueue(deque):
     def __init__ ( self, seq=0, maxlen=None ):
         '''
         Constructor.
-        'seq' argument is the sequence number the queue is initialized with. The
+        @param seq: the sequence number the queue is initialized with. The
         first message pushed into the queue shall get this sequence number plus one.
         By default it takes the value 0.
-        'maxlen' is used to control the maximum size of the queue. By default it
+        @param maxlen: controls the maximum size of the queue. By default it
         takes the value None, i.e. no maximum size limit.
         '''
         super(SequencedMsgSndQueue, self).__init__(maxlen=maxlen)
@@ -300,6 +302,7 @@ class PersistentSequencedMsgSndQueue(SequencedMsgSndQueue):
     def __getitem__ ( self, key ):
         if super(PersistentSequencedMsgSndQueue, self).__getitem__(key) is None:
             return self.__shelf[key]
+
 
 class SequencedMsgRcvQueue(list):
     '''
@@ -390,7 +393,7 @@ class RMcastServer(McastServer):
     received in a consecutive sequence (i.e., the last message received if no
     losses have taken place, or the last message before the first loss). This
     sequence number is bound to the 'ack' variable within the corresponding queue.
-    Every queue's 'ack' variable is reliably stored in disk.
+    Every queue's 'ack' variable is reliably stored on disk.
     
     When the server sees a message from a sender which sequence number is higher
     than the corresponding queue's 'ack' value it checks whether it has seen a
@@ -684,8 +687,7 @@ class RMcastServer(McastServer):
                 self.spottednak(baddr, ack) # ... record if we saw a NAK for someone else
             
     def checkmissing ( self, rcvq, baddr, tries=0 ):
-        rcvq.lock.acquire()
-        try:
+        with rcvq.lock:
             if not rcvq.empty:
                 # Not all messages could be delivered, see how bad it is
                 if len(rcvq) >= 3:
@@ -701,8 +703,6 @@ class RMcastServer(McastServer):
                 else:
                     # max time-outs in a row so we give up - notify upper layer
                     self.__handler.handleException(RMcastServer.RCV_EXCEPTION, baddr)
-        finally:
-            rcvq.lock.release()
         
     def spottednak ( self, baddr, ack ):
         addr = socket.inet_ntoa(RMcastServer.iton(baddr))
@@ -725,6 +725,7 @@ class RMcastServer(McastServer):
             msg = SequencedMessage(seq = self.__sndq.seq+1, epoch = self.__epoch, ack = self.__ack, body=data)
             if self.lossless:
                 self.__shelf[str(msg.seq)] = msg.body
+                self.__shelf.sync()
             self.__sndq.push(msg)
         else:
             msg = SequencedMessage(seq = 0, epoch = self.__epoch, ack = self.__ack, body=data)

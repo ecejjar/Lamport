@@ -758,7 +758,7 @@ class ServerTest(unittest.TestCase):
     def testPaxos ( self ):
         proposer = Paxos.Proposer()
         acceptor = Paxos.Acceptor()
-        listener = Paxos.Listener()
+        listener = Paxos.Learner()
 
 
 if __name__ == "__main__":
