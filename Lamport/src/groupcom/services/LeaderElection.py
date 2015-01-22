@@ -41,8 +41,7 @@ def _serve_forever ( self ):
     
     super(type(self), self).serve_forever()
     
-    self.timer0.cancel()
-    self.timer1.cancel()
+    self.close()        # cancel the running timers
 
     # Don't call socket.close() before canceling the timers,
     # or you'll get socket.error exceptions
@@ -65,7 +64,7 @@ class LeaderElectorBase(object):
         self.__timeout = timeout
         self.__peerslock = Lock()
         self.__peersdirty = False
-        self.__peers = list(peers)
+        self.__peers = sorted(peers) # list must be sorted so peerN has address X for all peers
         self.__round = 0
         self.__leader = None
         self.__closing = False
@@ -97,12 +96,12 @@ class LeaderElectorBase(object):
         to the constructor; more precisely, it is exactly half that time-out.
         '''
         return self.__timeout / 2
-        
+
     @property
     def n ( self ):
         '''The number of processes currently known.'''
         return len(self.__peers)
-    
+
     @property
     def p ( self ):
         '''This process' index within the list of known processes''' 
@@ -116,7 +115,7 @@ class LeaderElectorBase(object):
     def leader ( self ):
         '''Tells this process' current view on who's the current leader'''
         return self.__leader
-    
+
     @leader.setter
     def leader ( self, p ):
         '''Sets the leader to the value passed as argument and notifies the registered observer, if any'''
@@ -132,40 +131,42 @@ class LeaderElectorBase(object):
     def isLeader ( self ):
         '''Tells whether this process believes it's the current leader.'''
         return self.leader == self.p
-    
+
     @property
     def dirty ( self ):
         '''Tells whether this process' peer list has been modified'''
         return self.__peersdirty
-    
+
     @dirty.setter
     def dirty ( self, d ):
         self.__peersdirty = d
-        
+
     @property
     def peers ( self ):
         '''This process' current view of known peer processes. Thread-unsafe.'''
         return self.__peers
-    
+
     @peers.setter
     def peers ( self, peers ):
         '''Setter for the list of known peers. Thread-safe.'''
         with self.__peerslock:
-            self.__peers = list(peers)
+            self.__peers = list(map(lambda p: tuple(p), peers))
             self.__peersdirty = True
-            
+
     @property
     def timer0 ( self ):
         '''Timer driving task0 from the stable leader election algorithm'''
         return self.__task0
-    
+
     @property
     def timer1 ( self ):
         'Timer driving task1 from the stable leader election algorithm'
         return self.__timer
-    
+
     def restartTimer ( self ):
         'Restarts timer1'
+        if self.closing: return     # See _serve_forever()
+        
         if self.__timer is not None:
             if current_thread() != self.__timer:
                 # This happens when startRound() is called from task1; in this case timer1
@@ -199,6 +200,8 @@ class LeaderElectorBase(object):
     def close ( self ):
         '''Signal the process is to shutdown as soon as possible'''
         self.__closing = True
+        self.timer0.cancel()
+        self.timer1.cancel()
         
     @property
     def closing ( self ):
@@ -232,12 +235,13 @@ class LeaderElector(LeaderElectorBase):
 
         # Check we know at least one other peer
         if len(peers) < 2:
-            return logger.warning("Peer %d does not know two peers to say Hello to!")
+            logger.warning(
+                "Peer %d does not know two peers to say Hello to, fault tolerance is not guaranteed!")
             
         # Send the initial Hello message
         msg = type(self).HelloMsg(self.address())
-        rcvrlist = map(lambda rcvr: self.send(msg, rcvr), peers)
         try:
+            rcvrlist = map(lambda rcvr: self.send(msg, rcvr), peers)
             if any(rcvrlist):
                 raise socket.error("not all data sent")
         except Exception as e:
@@ -286,9 +290,9 @@ class LeaderElector(LeaderElectorBase):
                 type(self).__name__, self.p, self.n )
             peerlistmodified = self.dirty
             peerlist = self.peersSnapshot()
-            msg = type(self).OkMsg(self.r, peerlist if peerlistmodified else self.n)
-            rcvrlist = map(lambda rcvr: self.send(msg, rcvr), peerlist)
+            msg = type(self).OkMsg(self.r, peerlist if peerlistmodified else len(peerlist))
             try:
+                rcvrlist = map(lambda rcvr: self.send(msg, rcvr), peerlist)
                 if any(rcvrlist):
                     raise socket.error("not all data sent")
             except Exception as e:
@@ -348,7 +352,7 @@ class LeaderElector(LeaderElectorBase):
             if self.closing and not self.address() in p:
                 return self.shutdown()
         elif p != self.n:
-            self.send(self.leader, type(self).HelloMsg(self.address()))
+            self.send(self.leader, type(self).HelloMsg(self.address))
 
         k = msg.round
         if k == self.r:
@@ -532,7 +536,7 @@ class StableLeaderElector(object):
             with self.__peerslock:
                 msg = type(self).OkMsg(self.r, (self.__peersdirty and list(self.__peers)) or self.n)
                 self.__peersdirty = False
-            rcvrlist = map(lambda rcvr: self.send(msg, rcvr), self.__peers)
+                rcvrlist = map(lambda rcvr: self.send(msg, rcvr), self.__peers)
             try:
                 if any(rcvrlist):
                     raise socket.error("not all data sent")
@@ -546,11 +550,18 @@ class StableLeaderElector(object):
         send Stop to current leader and start new round
         '''
         # Can't use the leader property instead of r%n since if might be None
-        logger.info(\
+        logger.info(
             "%s: process %d timed-out on round %d", type(self).__name__, self.p, self.r)
         self.send(type(self).StopMsg(self.r), self.__peers[self.r % self.n])
         self.startRound(self.r + 1)
 
+    def close ( self ):
+        '''
+        Tell task0 and task1 to stop
+        '''
+        self.__task0.cancel()
+        self.__timer.cancel()
+        
     @server.ProtocolAgent.handles('StartMsg')        
     def handleStartMessage ( self, msg, src ):
         '''
@@ -809,10 +820,10 @@ class ExpiringLinksImpl(object):
                 stddev = avg/3                  # Allow 2x threshold when stddev info not reliable
             if avg < 0: thrsh = -thrsh          # O/w stddev wouldn't add but substract from avg when avg<0
             msg_delay = self_time - msg.timestamp + (avg + thrsh*stddev)
-            logger.debug("Estimated message delay for peer %s = %f", src, msg_delay)
+            logger.debug("discard(): estimated message delay for peer %s = %f", src, msg_delay)
             return msg_delay > self.d
         except KeyError:
-            logger.debug("No data about peer %s, letting the message get by", src)
+            logger.debug("discard(): no message delay data about peer %s, letting the message get by", src)
             return False
 
 
@@ -1014,6 +1025,13 @@ class OnStableLeaderElector(ExpiringLinksImpl):
             self.__okslefttoack = 1 // self.__ackratio
             self.send(type(self).AckMsg(time(), msg.timestamp, msg_rcv_ts, self.r), src)
 
+    def close ( self ):
+        '''
+        Tell task0 and task1 to stop
+        '''
+        self.__task0.cancel()
+        self.__timer.cancel()
+        
     @server.ProtocolAgent.handles('StartMsg')        
     def handleStartMessage ( self, msg, src ):
         '''
@@ -1145,7 +1163,7 @@ OnStableLeaderElector.serve_forever = _serve_forever
 
 
 @server.ProtocolAgent.UDP
-class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
+class O1StableLeaderElector ( LeaderElectorBase, ExpiringLinksImpl ):
     '''
     O(1) stable leader election with lossy links as described by Aguilera et al.
     Handles message losses using the expiring links implementation it extends.
@@ -1181,16 +1199,11 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
 
         # Check we know at least one other peer
         if len(peers) < 2:
-            return logger.warning("Peer %d does not know two peers to say Hello to!")
+            logger.warning(
+                "Peer %d does not know two peers to say Hello to, fault tolerance is not guaranteed!")
             
-        # Send the initial Hello message
-        msg = type(self).HelloMsg(self.address())
-        rcvrlist = map(lambda rcvr: self.send(msg, rcvr), peers)
-        try:
-            if any(rcvrlist):
-                logger.error("not all data sent")
-        except Exception as e:
-            logger.error("Peer %d failed sending Hello message to one or more peers, error: %s", self.p, e)
+        # Send the initial Hello message (the broadcast is actually to only two other processes)
+        self.broadcast(type(self).HelloMsg(self.address()))
 
     def startRound ( self, s ):
         '''
@@ -1207,14 +1220,9 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         logger.debug(
             "%s: process %d in %d starting round %d with peer %d %s",
             type(self).__name__, self.p, self.n, s, l, peers[l] )
+        self.broadcast(type(self).AlertMsg(time(), s))
         if self.p != l:
-            msg = type(self).StartMsg(time(), s)
-            rcvrlist = map(lambda rcvr: self.send(msg, rcvr), peers)
-            try:
-                if any(rcvrlist):
-                    logger.error("Peer %d failed sending OK to one or more peers")
-            except Exception as e:
-                logger.error("Peer %d failed sending OK to one or more peers, error: ", e)
+            self.broadcast(type(self).StartMsg(time(), s))
         self.r = s
         self.leader = None
         self.restartTimer()
@@ -1228,10 +1236,11 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
                 "%s: leader process %d sending OK to %d peers",
                 type(self).__name__, self.p, self.n )
             peers = self.peersSnapshot()
-            rcvrlist = map(
-                lambda rcvr: self.send(type(self).OkMsg(time(), self.O(rcvr), self.D(rcvr), self.r, peers), rcvr),
-                self.peers)
             try:
+                # TODO: optimize by reusing the same msg and calling msg._replace()
+                rcvrlist = map(
+                    lambda rcvr: self.send(type(self).OkMsg(time(), self.O(rcvr), self.D(rcvr), self.r, peers), rcvr),
+                    self.peers)
                 if any(rcvrlist):
                     logger.error("Peer %d failed sending OK to one or more peers", self.p)
             except Exception as e:
@@ -1239,8 +1248,7 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
                 
     def task1 ( self ):
         '''
-        It's been 2*self.__timeout without OKs from current leader;
-        send Stop to current leader and start new round
+        It's been 2*self.__timeout without OKs from current leader, start new round
         '''
         # Can't use the leader property instead of r%n since it might be None
         logger.info(
@@ -1255,13 +1263,22 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         if not self.__okslefttoack:
             self.__okslefttoack = 1 // self.__ackratio
             self.send(type(self).AckMsg(time(), msg.timestamp, msg_rcv_ts, self.r), src)
-
+            
+    def broadcast ( self, msg ):
+        '''Sends the same message to all the peers in the internal list'''
+        peers = self.peersSnapshot()
+        try:
+            rcvrlist = map(lambda rcvr: self.send(msg, rcvr), peers)
+            if any(rcvrlist):
+                logger.error("Peer %d failed sending %s to one or more peers", self.p, msg)
+        except Exception as e:
+            logger.error("Peer %d failed sending %s to one or more peers, error: %s", self.p, msg, e)
+        
     @server.ProtocolAgent.handles('StartMsg')        
     def handleStartMessage ( self, msg, src ):
         '''
         Handler for the Start message.
-        If the message comes from an unknown process, add the sender's
-        address to the list of known processes.
+        If the message comes from an unknown process just ignore it.
         If the message is calling for a round lower than this process'
         current round, just ignore it (delayed message).
         If the message is calling for a round higher than this process'
@@ -1270,26 +1287,33 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         ordering of rounds across all the processes).
         '''
         logger.debug(\
-            "%s: process %d received Start message for round %d from peer at %s",
-            type(self).__name__, self.p, msg.round, src )
+            "%s: process %d received %s from peer at %s",
+            type(self).__name__, self.p, msg, src )
+
+        if tuple(src) not in self.peers:
+            logger.warning("Peer %d received %s from unknown peer %s", self.p, msg, src)
+            return
 
         if self.discard(msg, src):
             logger.debug("Discarding Start message from peer %s with timestamp %f", src, msg.timestamp)
             return
         
-        self.addPeer(src)
         k = msg.round
         if k > self.r:
             self.startRound(k)
         elif k < self.r:
-            self.send(type(self).StartMessage(time(), self.r), src)
-            #return type(self).StartMessage(time(), self.r) should also work
+            self.send(type(self).StartMsg(time(), self.r), src)
+            #return type(self).StartMsg(time(), self.r) should also work
                         
     @server.ProtocolAgent.handles('OkMsg')        
     def handleOkMessage ( self, msg, src ):
         '''
         Handler for the Ok message.
-        If the message comes from an unknown process just ignore it.
+        Don't check if the message comes from an unknown process; that is probably
+        the case when the current leader just learned about me from a proxy process
+        and is sending me its first welcome OK message.
+        If I'm not in the list of peers broadcast by the leader send another Hello,
+        this time to the leader, and return.
         If the message is calling for a round lower than this process'
         current round, send start to the message originator (it missed
         the start/ok message(s) for the current round so needs a heads-up).
@@ -1302,26 +1326,27 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         # Log the message reception time
         msg_rcv_ts = time()
         
-        logger.debug(\
-            "%s: process %d received Ok message for round %d from peer at %s",
-            type(self).__name__, self.p, msg.round, src )
+        logger.debug(
+            "%s: process %d received %s from peer at %s",
+            type(self).__name__, self.p, msg, src )
         
-        if src not in self.peers:
-            logger.warning("Peer %d received message %s from unknown peer %s", self.p, msg, src)
-            return
-
-        # Consider the latest leader estimation before deciding if discard a message
+        # Consider the leader estimation before deciding if discard a message
         self.processOkTimestamp(msg, src)
         
         if self.discard(msg, src):
             logger.debug("Discarding Ok message from peer %s with timestamp %f", src, msg.timestamp)
             return
         
+        # Sync the peer list with the leader; we need to be in sync before running the
+        # calculation that follows
+        if msg.peers is not None:
+            self.peers = msg.peers
+
         k = msg.round
         if k == self.r:
             self.__okcount += 1
             if self.leader is None and self.__okcount >= 2 and \
-              ( time() - self.__lastalert.time > 6*self.d or self.__lastalert.round <= k):
+              ( time() - self.__lastalert.time > 6*self.d or self.__lastalert.round <= k ):
                 self.__okcount = 0
                 self.leader = k % self.n
             self.restartTimer()
@@ -1337,8 +1362,8 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
     @server.ProtocolAgent.handles('AlertMsg')
     def handleAlertMsg ( self, msg, src ):
         logger.debug(\
-            "%s: process %d received Alert message for round %d from peer at %s",
-            type(self).__name__, self.p, msg.round, src )
+            "%s: process %d received %s from peer at %s",
+            type(self).__name__, self.p, msg, src )
 
         if self.discard(msg, src):
             logger.debug("Discarding Alert message from peer %s with timestamp %f", src, msg.timestamp)
@@ -1362,14 +1387,14 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         Delegates calculation of clock offset and network delay to ExpiringLinksImpl base class.
         '''
         logger.debug(
-            "%s: process %d received Ack message for round %d from peer at %s",
-            type(self).__name__, self.p, msg.round, src )
+            "%s: process %d received %s from peer at %s",
+            type(self).__name__, self.p, msg, src )
 
         if src not in self.peers:
             logger.warning("Peer %d received message %s from unknown peer %s", self.p, msg, src)
             return
 
-        # Acks from known peers are never discarded, they carry useful info
+        # Acks from unknown peers are never discarded, they carry useful info
         self.processAckTimestamp(msg, src)
         
     @server.ProtocolAgent.handles('HelloMsg')        
@@ -1381,8 +1406,8 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         The leader broadcasts the updated peer list with the next OK message.
         '''
         logger.debug(
-            "%s: process %d received Hello message from peer at %s, reported address %s",
-            type(self).__name__, self.p, src, msg.address)
+            "%s: process %d received %s from peer at %s",
+            type(self).__name__, self.p, msg, src)
 
         if self.isLeader:
             self.addPeer(tuple(msg.address))    # Caution: JSON decoding creates list, not tuple!
@@ -1404,8 +1429,8 @@ class O1StableLeaderElector(LeaderElectorBase, ExpiringLinksImpl):
         The leader broadcasts the updated peer list with the next OK message.
         '''
         logger.debug(
-            "%s: process %d received Bye message from peer at %s, reported address %s",
-            type(self).__name__, self.p, src, msg.address)
+            "%s: process %d received %s from peer at %s",
+            type(self).__name__, self.p, msg, src)
 
         if self.isLeader:
             self.removePeer(msg.address)

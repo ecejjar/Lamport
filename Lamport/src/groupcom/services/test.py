@@ -4,7 +4,8 @@ Created on 08/03/2013
 @author: ecejjar
 '''
 
-import FileCaster, LeaderElection, Paxos
+#import groupcom.services.FileCaster, groupcom.services.LeaderElection, groupcom.services.Paxos
+from groupcom.services import FileCaster, LeaderElection, Paxos
 import unittest
 import socket
 import logging
@@ -56,7 +57,7 @@ class LeaderElecionTest(unittest.TestCase):
         print("Elector at %s notifies its current leader is %s" % (elector.server_address, elector.leader))
         self.__leader[elector.server_address] = elector.leader
                         
-    #@unittest.skip("Long test")
+    #@unittest.skip("Unstable")
     def testLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -85,7 +86,7 @@ class LeaderElecionTest(unittest.TestCase):
             print("Waiting for electors to agree on a leader, you should see some console messages...")
             sleep(3)
             l = next(iter(self.__leader.values()))
-            self.assertSameElements(
+            self.assertCountEqual(
                 addresses, self.__leader.keys(),
                 "Something went wrong, some elector didn't notify its observer")
             self.assertNotIn(
@@ -121,7 +122,7 @@ class LeaderElecionTest(unittest.TestCase):
                 " Ending testLeaderElection\n" +
                 "=======================================================================\n")
 
-    #@unittest.skip("Unfinished")
+    #@unittest.skip("Unstable")
     def testDynamicMembership ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -153,7 +154,7 @@ class LeaderElecionTest(unittest.TestCase):
             self.assertNotIn(
                 None, self.__leader.values(),
                 "Something went wrong, some elector has None as leader")
-            self.assertSameElements(
+            self.assertCountEqual(
                 addresses[:2], self.__leader.keys(),
                 "Something went wrong, some elector didn't notify its observer")
             print("Starting third to fifth leader electors on ports %d-%d" % (BASE_PORT+2, BASE_PORT+NUM_OF_PEERS))
@@ -164,7 +165,7 @@ class LeaderElecionTest(unittest.TestCase):
             self.assertNotIn(
                 None, self.__leader.values(),
                 "Something went wrong, some elector has None as leader")
-            self.assertSameElements(
+            self.assertCountEqual(
                 addresses, self.__leader.keys(),
                 "Something went wrong, some elector didn't notify its observer")
             self.assertListEqual(
@@ -175,14 +176,14 @@ class LeaderElecionTest(unittest.TestCase):
             print("Shutting down all electors")
             for peer in peers:
                 peer.shutdown()
-                #peer.socket.close()
+                peer.socket.close()
         
             print(
                 "-----------------------------------------------------------------------\n" +
                 " Ending testLeaderElection\n" +
                 "=======================================================================\n")
             
-    #@unittest.skip("Long test")
+    #@unittest.skip("Unstable")
     def testStableLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -246,7 +247,7 @@ class LeaderElecionTest(unittest.TestCase):
             sleep(M/2)
             l = self.__leader[addresses[0]]
             print("Electors agreed on peer %s" % l)
-            self.assertSameElements(
+            self.assertCountEqual(
                 addresses, self.__leader.keys(),
                 "Something went wrong, some elector didn't notify its observer")
             self.assertListEqual(
@@ -346,7 +347,7 @@ class LeaderElecionTest(unittest.TestCase):
             " Ending testExpiringLinks\n" +
             "=======================================================================\n")
 
-    #@unittest.skip("Long test")
+    #@unittest.skip("Unstable")
     def testOnStableLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -376,7 +377,7 @@ class LeaderElecionTest(unittest.TestCase):
             self.assertNotIn(
                 None, self.__leader.values(),
                 "Something went wrong, some elector has None as leader")
-            self.assertSameElements(
+            self.assertCountEqual(
                 addresses, self.__leader.keys(),
                 "Something went wrong, some elector didn't notify its observer")
             self.assertListEqual(
@@ -394,7 +395,7 @@ class LeaderElecionTest(unittest.TestCase):
                 " Ending testOnStableLeaderElection\n" +
                 "=======================================================================\n")
         
-    #@unittest.skip("Long test")
+    #@unittest.skip("Unstable")
     def testO1StableLeaderElection ( self ):
         def testfunc ( s ):
             s.serve_forever()
@@ -419,12 +420,12 @@ class LeaderElecionTest(unittest.TestCase):
             print("Starting %d O(1) stable leader electors on ports %d to %d" % (NUM_OF_PEERS, BASE_PORT, BASE_PORT+NUM_OF_PEERS-1))
             for thread in threads: thread.start()
             print("Waiting for electors to agree on a leader (6 times %f), you should see some console messages..." % d)
-            sleep(6*d)
+            sleep(7*d)
             l = next(iter(self.__leader.values()))
             self.assertNotIn(
                 None, self.__leader.values(),
                 "Something went wrong, some elector has None as leader")
-            self.assertSameElements(
+            self.assertCountEqual(
                 addresses, self.__leader.keys(),
                 "Something went wrong, some elector didn't notify its observer")
             self.assertListEqual(
@@ -442,7 +443,7 @@ class LeaderElecionTest(unittest.TestCase):
                 " Ending testO1StableLeaderElection\n" +
                 "=======================================================================\n")
     
-    #@unittest.skip("Unfinished")
+    @unittest.skip("Unfinished")
     def testPaxos ( self ):
         def testfunc ( s ):
             s.serve_forever()

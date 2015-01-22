@@ -17,7 +17,11 @@ from collections import namedtuple, deque
 from struct import pack, unpack, calcsize
 from heapq import heappush, heappop
 from random import uniform
-from threading import Timer, Lock, Thread, _Timer
+from threading import Timer, Lock, Thread
+try:
+    from threading import _Timer    # Python 2.x
+except:
+    _Timer = Timer
 from operator import add
 from select import select
 from time import clock
@@ -1009,7 +1013,16 @@ class ProtocolAgent(type):
             def handle ( self ):
                 sock = self.request
                 peer = sock.getpeername()
-                if peer not in self.server.peers: self.server.addpeer(peer, sock)
+                if peer not in self.server.peers:
+                    # We received from someone we've never seen before so we're pure server;
+                    # the connection is incoming so it should be recycled on exit.
+                    self.server.addpeer(peer, sock)
+                    recycleconn = True
+                else:
+                    # We've seen this guy before; either we sent something to it in the first place
+                    # or we received something from it in the first place when the server stated it
+                    # wants to reuse the connection. In both cases the connection is not to be recycled.
+                    recycleconn = False
                 try:
                     while True:
                         data = sock.recv(2)
@@ -1018,9 +1031,10 @@ class ProtocolAgent(type):
                         data = sock.recv(msglen)
                         result = self.server.handle(data, self.client_address)
                         if result is not None:
-                            sock.send(result)
-                    self.server.delpeer(peer)
-                    self.server.closed(peer)
+                            self.server.send(result, peer)
+                    if recycleconn and not self.server.reuseconn:
+                        sock.close()
+                        self.server.delpeer(peer)
                 except socket.error as msg:
                     logger.warning("Error sending result message to remote peer %s, cause: %s" % (self.client_address, msg))
                 
@@ -1032,10 +1046,14 @@ class ProtocolAgent(type):
                 cls.__init__(self, *args, **kwargs)
                 self.__peers = {}
                 self.__peersmutex = Lock()
+                self.__reuseconn = False
             
             @property
             def peers ( self ): return self.__peers
-            
+
+            @property
+            def reuseconn ( self ): return self.__reuseconn
+                        
             def addpeer ( self, address, sock ):
                 with self.__peersmutex:
                     self.__peers[address] = sock
@@ -1162,11 +1180,11 @@ class StateXferAgent(object):
                 if callMeWhenDone is not None: callMeWhenDone(dst)
             except Exception as e:
                 if callMeOnError is not None: callMeOnError(dst, e)
-                
+
         stateXferThread = Thread(target=func, name=type(self).__name__)
         stateXferThread.run()
         return stateXferThread  # Just in case caller needs to join() on it
-        
+
     @ProtocolAgent.handles('ItemMsg')
     def receiveItem ( self, msg, src ):
         self.state[msg.key] = msg.value
